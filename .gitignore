@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Terraform (.terraform.lock.hcl is intentionally committed)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log

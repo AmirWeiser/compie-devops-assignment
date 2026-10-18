@@ -1,0 +1,4 @@
+# Allow-list: only what the image needs enters the build context.
+*
+!requirements.txt
+!main.py
