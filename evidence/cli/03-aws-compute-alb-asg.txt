@@ -1,0 +1,52 @@
+# Compute, load balancer and target health (captured 2026-10-19 10:01 UTC, read-only AWS CLI, account ID redacted)
+
+$ aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names compie-app-dev --query AutoScalingGroups[0].[MinSize,DesiredCapacity,MaxSize,HealthCheckType,HealthCheckGracePeriod] --output table
+---------------------------
+|DescribeAutoScalingGroups|
++-------------------------+
+|  2                      |
+|  2                      |
+|  4                      |
+|  ELB                    |
+|  300                    |
++-------------------------+
+
+$ aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names compie-app-dev --query AutoScalingGroups[0].Instances[].[InstanceId,AvailabilityZone,LifecycleState,HealthStatus] --output table
+---------------------------------------------------------------
+|                  DescribeAutoScalingGroups                  |
++----------------------+-------------+------------+-----------+
+|  i-0334131c9f087a0c1 |  us-east-1b |  InService |  Healthy  |
+|  i-0da6ebc3f3e04f61e |  us-east-1a |  InService |  Healthy  |
++----------------------+-------------+------------+-----------+
+
+$ aws ec2 describe-instances --filters Name=tag:aws:autoscaling:groupName,Values=compie-app-dev Name=instance-state-name,Values=running --query Reservations[].Instances[].[InstanceId,Placement.AvailabilityZone,PrivateIpAddress,PublicIpAddress||`none`,InstanceType,MetadataOptions.HttpTokens,MetadataOptions.HttpPutResponseHopLimit] --output table
+-------------------------------------------------------------------------------------------
+|                                    DescribeInstances                                    |
++----------------------+-------------+--------------+-------+-----------+-----------+-----+
+|  i-0334131c9f087a0c1 |  us-east-1b |  10.0.11.253 |  none |  t3.micro |  required |  2  |
+|  i-0da6ebc3f3e04f61e |  us-east-1a |  10.0.10.99  |  none |  t3.micro |  required |  2  |
++----------------------+-------------+--------------+-------+-----------+-----------+-----+
+
+$ aws elbv2 describe-load-balancers --names compie-app-dev --query LoadBalancers[].[DNSName,Scheme,Type,State.Code] --output table
+-------------------------------------------------------------------------------------------------------
+|                                        DescribeLoadBalancers                                        |
++--------------------------------------------------------+------------------+--------------+----------+
+|  compie-app-dev-1298352608.us-east-1.elb.amazonaws.com |  internet-facing |  application |  active  |
++--------------------------------------------------------+------------------+--------------+----------+
+
+$ aws elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:us-east-1:<ACCOUNT_ID>:targetgroup/compie-app-dev/ea5c02537347182e --query TargetHealthDescriptions[].[Target.Id,Target.Port,TargetHealth.State] --output table
+--------------------------------------------
+|           DescribeTargetHealth           |
++----------------------+-------+-----------+
+|  i-0334131c9f087a0c1 |  8000 |  healthy  |
+|  i-0da6ebc3f3e04f61e |  8000 |  healthy  |
++----------------------+-------+-----------+
+
+$ aws autoscaling describe-instance-refreshes --auto-scaling-group-name compie-app-dev --query InstanceRefreshes[].[InstanceRefreshId,Status,PercentageComplete,StartTime,EndTime] --output table
+-------------------------------------------------------------------------------------------------------------------------
+|                                               DescribeInstanceRefreshes                                               |
++---------------------------------------+-------------+------+----------------------------+-----------------------------+
+|  0da3a977-819b-4316-832a-0fef0c495286 |  Successful |  100 |  2026-10-19T09:06:36+00:00 |  2026-10-19T09:13:04+00:00  |
+|  2b22df50-52ff-473f-b2af-6ce2a4373b06 |  Successful |  100 |  2026-10-19T08:40:23+00:00 |  2026-10-19T08:47:03+00:00  |
++---------------------------------------+-------------+------+----------------------------+-----------------------------+
+

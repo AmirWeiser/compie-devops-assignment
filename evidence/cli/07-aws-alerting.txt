@@ -1,0 +1,37 @@
+# Alerting: SNS topic, subscription, CloudWatch alarms and the SetAlarmState test (captured 2026-10-19 10:02 UTC, read-only AWS CLI, account ID redacted)
+
+$ aws sns get-topic-attributes --topic-arn arn:aws:sns:us-east-1:<ACCOUNT_ID>:compie-app-dev-alerts --query Attributes.[TopicArn,SubscriptionsConfirmed,SubscriptionsPending] --output table
+--------------------------------------------------------------
+|                     GetTopicAttributes                     |
++------------------------------------------------------------+
+|  arn:aws:sns:us-east-1:<ACCOUNT_ID>:compie-app-dev-alerts  |
+|  1                                                         |
+|  0                                                         |
++------------------------------------------------------------+
+
+$ aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:<ACCOUNT_ID>:compie-app-dev-alerts --query Subscriptions[].[Protocol,Endpoint] --output table
+------------------------------------
+|     ListSubscriptionsByTopic     |
++--------+-------------------------+
+|  email |  <ALERT_EMAIL>  |
++--------+-------------------------+
+
+$ aws cloudwatch describe-alarms --alarm-name-prefix compie-app-dev- --query MetricAlarms[].[AlarmName,MetricName,Statistic,Period,EvaluationPeriods,ComparisonOperator,Threshold,TreatMissingData,StateValue] --output table
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+|                                                                   DescribeAlarms                                                                    |
++---------------------------------+----------------------------+----------+------+----+--------------------------------+------+----------------+------+
+|  compie-app-dev-no-healthy-hosts|  HealthyHostCount          |  Minimum |  60  |  2 |  LessThanThreshold             |  1.0 |  breaching     |  OK  |
+|  compie-app-dev-target-5xx      |  HTTPCode_Target_5XX_Count |  Sum     |  300 |  1 |  GreaterThanOrEqualToThreshold |  5.0 |  notBreaching  |  OK  |
+|  compie-app-dev-unhealthy-hosts |  UnHealthyHostCount        |  Maximum |  60  |  3 |  GreaterThanThreshold          |  0.0 |  notBreaching  |  OK  |
++---------------------------------+----------------------------+----------+------+----+--------------------------------+------+----------------+------+
+
+$ aws cloudwatch describe-alarm-history --alarm-name compie-app-dev-unhealthy-hosts --start-date 2026-10-19T08:20:00Z --end-date 2026-10-19T08:30:00Z --query AlarmHistoryItems[].[Timestamp,HistoryItemType,HistorySummary] --output table
+----------------------------------------------------------------------------------------------------------------------------------------------
+|                                                            DescribeAlarmHistory                                                            |
++-----------------------------------+--------------+-----------------------------------------------------------------------------------------+
+|  2026-10-19T11:23:48.063000+03:00 |  Action      |  Successfully executed action arn:aws:sns:us-east-1:<ACCOUNT_ID>:compie-app-dev-alerts  |
+|  2026-10-19T11:23:48.028000+03:00 |  StateUpdate |  Alarm updated from ALARM to OK                                                         |
+|  2026-10-19T11:23:08.197000+03:00 |  Action      |  Successfully executed action arn:aws:sns:us-east-1:<ACCOUNT_ID>:compie-app-dev-alerts  |
+|  2026-10-19T11:23:08.159000+03:00 |  StateUpdate |  Alarm updated from OK to ALARM                                                         |
++-----------------------------------+--------------+-----------------------------------------------------------------------------------------+
+

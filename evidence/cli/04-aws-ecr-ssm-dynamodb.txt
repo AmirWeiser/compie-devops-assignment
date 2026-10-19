@@ -1,0 +1,38 @@
+# ECR, SSM Parameter Store (names only, never values), DynamoDB (captured 2026-10-19 10:01 UTC, read-only AWS CLI, account ID redacted)
+
+$ aws ecr describe-repositories --repository-names compie-app --query repositories[].[repositoryName,imageTagMutability,imageScanningConfiguration.scanOnPush,encryptionConfiguration.encryptionType] --output table
+-----------------------------------------------
+|            DescribeRepositories             |
++-------------+-------------+-------+---------+
+|  compie-app |  IMMUTABLE  |  True |  AES256 |
++-------------+-------------+-------+---------+
+
+$ aws ecr describe-images --repository-name compie-app --query sort_by(imageDetails,&imagePushedAt)[].[imageTags[0],imagePushedAt,imageSizeInBytes] --output table
+-------------------------------------------------------------
+|                      DescribeImages                       |
++---------+------------------------------------+------------+
+|  45cc857|  2026-10-18T19:31:30.951000+03:00  |  67246354  |
+|  33657ed|  2026-10-19T11:40:18.852000+03:00  |  67246512  |
+|  78dc9e1|  2026-10-19T12:06:30.734000+03:00  |  67247063  |
++---------+------------------------------------+------------+
+
+$ aws ssm describe-parameters --parameter-filters Key=Path,Values=/compie-app/dev --query Parameters[].[Name,Type,KeyId,LastModifiedDate] --output table
+----------------------------------------------------------------------------------------------------------
+|                                           DescribeParameters                                           |
++----------------------------------+---------------+----------------+------------------------------------+
+|  /compie-app/dev/image_tag       |  String       |  None          |  2026-10-19T12:06:31.762000+03:00  |
+|  /compie-app/dev/table_name      |  SecureString |  alias/aws/ssm |  2026-10-19T10:40:16.351000+03:00  |
+|  /compie-app/dev/welcome_message |  SecureString |  alias/aws/ssm |  2026-10-19T10:40:06.883000+03:00  |
++----------------------------------+---------------+----------------+------------------------------------+
+
+$ aws dynamodb describe-table --table-name compie-app-dev --query Table.[TableName,TableStatus,BillingModeSummary.BillingMode,SSEDescription.Status,SSEDescription.SSEType] --output table
+---------------------
+|   DescribeTable   |
++-------------------+
+|  compie-app-dev   |
+|  ACTIVE           |
+|  PAY_PER_REQUEST  |
+|  ENABLED          |
+|  KMS              |
++-------------------+
+

@@ -1,0 +1,36 @@
+# Local Docker run evidence (captured 2026-10-19 10:00 UTC)
+
+$ docker compose ps
+SERVICE          IMAGE                         STATUS
+app              compie-app:local              Up 57 seconds (healthy)
+dynamodb-local   amazon/dynamodb-local:3.3.2   Up About a minute
+
+$ docker image ls compie-app:local
+REPOSITORY:TAG     SIZE
+compie-app:local   161MB
+
+$ docker compose exec app id
+uid=10001(appuser) gid=999(appuser) groups=999(appuser)
+
+$ curl -i localhost:8000/
+HTTP/1.1 200 OK
+{"app":"compie-app","version":"dev","message":"Hello from the Compie DevOps assignment (local)","status":"running"}
+
+$ curl -i localhost:8000/health
+HTTP/1.1 200 OK
+{"status":"ok"}
+
+$ curl -i localhost:8000/ready
+HTTP/1.1 200 OK
+{"status":"ready","database":{"status":"ok","table":"compie-app-local"}}
+
+$ docker compose stop dynamodb-local   # simulate a database outage
+ Container compie-devops-assignment-dynamodb-local-1 Stopped 
+
+$ curl -i localhost:8000/ready
+HTTP/1.1 503 Service Unavailable
+{"status":"not_ready","database":{"status":"unavailable","table":"compie-app-local"}}
+
+$ curl -i localhost:8000/health   # liveness unaffected
+HTTP/1.1 200 OK
+{"status":"ok"}
