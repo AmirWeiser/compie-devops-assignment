@@ -1,0 +1,56 @@
+#!/bin/bash
+# Boot script: install Docker, read config from SSM, pull the image from ECR, run the app.
+# Template variables: region, param_path, image_repo, log_group.
+#
+# Output goes to /var/log/cloud-init-output.log and the EC2 console output
+# (aws ec2 get-console-output --instance-id <id>), so failures are visible without SSH.
+set -Eeuo pipefail # -E: the ERR trap also fires inside functions and command substitutions
+
+log() { echo "user-data: $*" >&2; } # stderr, so it is never captured by $(...)
+trap 'log "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+# Retry AWS calls briefly: a freshly created IAM role can take a few seconds to propagate.
+retry() {
+  for attempt in 1 2 3 4 5; do
+    "$@" && return 0
+    log "attempt $attempt failed: $*"
+    sleep 5
+  done
+  return 1
+}
+
+log "installing docker"
+dnf install -y docker
+systemctl enable --now docker
+
+log "reading instance id (IMDSv2)"
+TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+param() {
+  retry aws ssm get-parameter --region ${region} --with-decryption \
+    --name "${param_path}/$1" --query Parameter.Value --output text
+}
+
+log "reading config from SSM ${param_path}"
+IMAGE_TAG=$(param image_tag)
+WELCOME_MESSAGE=$(param welcome_message)
+TABLE_NAME=$(param table_name)
+
+log "logging in to ECR and pulling ${image_repo}:$IMAGE_TAG"
+retry sh -c "aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${image_repo}"
+retry docker pull "${image_repo}:$IMAGE_TAG"
+
+log "starting container"
+docker run -d --name app --restart unless-stopped -p 8000:8000 \
+  -e AWS_REGION=${region} \
+  -e WELCOME_MESSAGE="$WELCOME_MESSAGE" \
+  -e DYNAMODB_TABLE_NAME="$TABLE_NAME" \
+  -e FORWARDED_ALLOW_IPS='*' \
+  --log-driver awslogs \
+  --log-opt awslogs-region=${region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-stream="$INSTANCE_ID" \
+  "${image_repo}:$IMAGE_TAG"
+
+log "done: instance $INSTANCE_ID running image tag $IMAGE_TAG"

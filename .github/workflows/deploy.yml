@@ -1,0 +1,109 @@
+# CI/CD: test -> build -> push to ECR -> set image tag in SSM -> ASG instance refresh -> smoke test.
+# Pull requests run tests only. Pushes to main (and manual runs) also deploy to dev.
+
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege for the GITHUB_TOKEN by default; the deploy job adds id-token for OIDC.
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: compie-app
+  ASG_NAME: compie-app-dev
+  ALB_NAME: compie-app-dev
+  IMAGE_TAG_PARAM: /compie-app/dev/image_tag
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Note: no `environment:` key. It would change the OIDC "sub" claim and break the role's trust policy.
+    # One deployment at a time; an ASG allows only one instance refresh at once.
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    permissions:
+      id-token: write # OIDC token for AWS
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image (tag = short git SHA, immutable)
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          # Tags are immutable: on a re-run of the same commit, reuse the existing image.
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "Image $TAG already in ECR, skipping build"
+          else
+            docker build -t "$IMAGE:$TAG" app
+            docker push "$IMAGE:$TAG"
+          fi
+
+      - name: Set image tag in SSM
+        run: aws ssm put-parameter --name "$IMAGE_TAG_PARAM" --value "$IMAGE_TAG" --overwrite
+
+      - name: Roll out with instance refresh
+        run: |
+          # Every instance is replaced (SkipMatching=false); new instances read the tag from SSM at boot.
+          # Min 100 / Max 200: launch replacements before terminating old instances.
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200,"SkipMatching":false}' \
+            --query InstanceRefreshId --output text)
+          echo "Instance refresh $REFRESH_ID started"
+
+          for _ in $(seq 1 60); do # up to 20 minutes
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            echo "Status: $STATUS"
+            case "$STATUS" in
+              Successful) exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed) exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "Timed out waiting for instance refresh" >&2
+          exit 1
+
+      - name: Smoke test through the ALB
+        run: |
+          DNS=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          # Retries absorb the short window where old targets are still draining.
+          for path in /health /ready /; do
+            curl -fsS --retry 5 --retry-all-errors --retry-delay 5 "http://$DNS$path"
+            echo
+          done
