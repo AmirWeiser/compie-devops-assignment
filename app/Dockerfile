@@ -15,6 +15,11 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 # Code is owned by root and read-only to appuser.
 COPY main.py .
 
+# Build metadata, not configuration: which commit this image was built from.
+# Declared after the dependency layer so a new version does not invalidate the pip cache.
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 USER appuser
 EXPOSE 8000
 

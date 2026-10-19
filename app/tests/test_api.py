@@ -7,7 +7,17 @@ from main import create_app
 def test_root(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"app": "compie-app", "message": "Hello from tests", "status": "running"}
+    assert response.json() == {
+        "app": "compie-app",
+        "version": "dev",
+        "message": "Hello from tests",
+        "status": "running",
+    }
+
+
+def test_root_reports_build_version(env, monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "abc1234")
+    assert TestClient(create_app()).get("/").json()["version"] == "abc1234"
 
 
 def test_health(client):

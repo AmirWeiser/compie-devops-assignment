@@ -15,6 +15,7 @@ def env(monkeypatch):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.delenv("DYNAMODB_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("APP_VERSION", raising=False)
 
 
 @pytest.fixture

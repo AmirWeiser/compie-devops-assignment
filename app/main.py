@@ -21,6 +21,7 @@ logger = logging.getLogger("app")
 def create_app() -> FastAPI:
     # Required settings raise KeyError if missing, so the app fails at startup.
     app_name = os.environ.get("APP_NAME", "compie-app")
+    app_version = os.environ.get("APP_VERSION", "dev")  # baked into the image at build time (git SHA)
     welcome_message = os.environ["WELCOME_MESSAGE"]
     table_name = os.environ["DYNAMODB_TABLE_NAME"]
 
@@ -36,7 +37,7 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def root():
-        return {"app": app_name, "message": welcome_message, "status": "running"}
+        return {"app": app_name, "version": app_version, "message": welcome_message, "status": "running"}
 
     @app.get("/health")
     def health():

@@ -67,7 +67,7 @@ jobs:
           if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
             echo "Image $TAG already in ECR, skipping build"
           else
-            docker build -t "$IMAGE:$TAG" app
+            docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" app
             docker push "$IMAGE:$TAG"
           fi
 
@@ -107,3 +107,13 @@ jobs:
             curl -fsS --retry 5 --retry-all-errors --retry-delay 5 "http://$DNS$path"
             echo
           done
+
+          # The ALB must now serve the version we just deployed (several calls hit both instances).
+          for _ in 1 2 3 4 5 6; do
+            VERSION=$(curl -fsS "http://$DNS/" | jq -r .version)
+            if [ "$VERSION" != "$IMAGE_TAG" ]; then
+              echo "Expected version $IMAGE_TAG, got $VERSION" >&2
+              exit 1
+            fi
+          done
+          echo "ALB serves version $IMAGE_TAG"
