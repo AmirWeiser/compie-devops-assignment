@@ -6,9 +6,12 @@ Application Load Balancer. It uses DynamoDB, ECR, SSM Parameter Store, CloudWatc
 Logs and Alarms, and KMS encryption at rest. Every push to `main` is tested, built and rolled
 out by GitHub Actions.
 
-> **Status:** deployed and verified end to end on 2026-10-19 (us-east-1). See
-> [Deployment evidence](#deployment-evidence). The environment is torn down after
-> submission to avoid cost; `terraform apply` recreates it in about 10 minutes.
+> **Status (2026-10-19):** deployed and verified end to end in us-east-1, see
+> [Deployment evidence](#deployment-evidence). The AWS environment is **still running and
+> has not been destroyed yet**. It will be torn down with the
+> [teardown steps](#cost-and-teardown) after review, to avoid ongoing cost (about
+> $2.5/day). A read-only `terraform plan` from a fresh clone of this repository reported
+> **"No changes"** against the live infrastructure.
 
 ## Contents
 
@@ -183,11 +186,19 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 docker build --build-arg APP_VERSION="$TAG" -t "$REPO:$TAG" app && docker push "$REPO:$TAG"
 
 # 3. Main stack (44 resources, about 5 minutes)
+#    The state bucket is named compie-app-tfstate-<account-id>.
 terraform -chdir=terraform init -backend-config="bucket=$(terraform -chdir=terraform/bootstrap output -raw state_bucket)"
 terraform -chdir=terraform apply -var="image_tag=$TAG" -var="alert_email=you@example.com"
 terraform -chdir=terraform output alb_url
 ```
 
+- **Bootstrap state is local.** `terraform/bootstrap/terraform.tfstate` is gitignored and
+  exists only on the machine that ran the bootstrap, so `terraform output` for that stack
+  works only there. In a fresh clone it prints nothing. On another machine, pass the
+  bucket name directly, `-backend-config="bucket=compie-app-tfstate-<account-id>"`, and
+  take the ECR URL from `aws ecr describe-repositories --repository-names compie-app`.
+  This path was checked read-only from a fresh clone: `init` succeeded, and `plan`
+  reported "No changes".
 - **Health checks:** instances become healthy in the target group about 2–5 minutes after
   apply (the ASG health check grace period is 300s).
 - **`image_tag`** is used only on the first apply. Afterwards the pipeline owns the SSM
@@ -216,24 +227,53 @@ Workflow: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 3. **Set the image tag** in SSM `/compie-app/dev/image_tag`.
 4. **Instance refresh** with `MinHealthyPercentage=100`, `MaxHealthyPercentage=200`, and
    `SkipMatching=false`.
-   - New instances launch before old ones terminate, so capacity never drops.
+   - The preferences ask the ASG to launch replacements first (up to 200%) and to keep
+     100% of desired capacity healthy, so old instances are terminated only after their
+     replacements pass the health check and warm-up. This **reduces** the risk of
+     downtime but does not guarantee it. In-flight requests on a draining instance
+     (30s deregistration delay) or a replacement that never becomes healthy can still
+     cause errors; in that case the refresh stalls instead of removing healthy
+     instances.
+   - **Observed:** two refreshes completed with 0 ALB or target 5xx responses. The only
+     traffic during them was the smoke tests, so this was **not** a load test.
    - Each new instance reads the tag from SSM at boot.
    - Every instance is replaced even though the launch template has not changed.
    - The job polls until the refresh reports `Successful`. A `concurrency` group prevents
      overlapping refreshes.
-5. **Smoke test** through the ALB: `/health`, `/ready` and `/`, then it checks that the ALB
-   serves **exactly the version just deployed**.
+5. **Smoke test** through the ALB: `/health`, `/ready` and `/`, then 6 consecutive requests
+   to `/` must all return the version just deployed. That is a strong sample across both
+   targets, not a per-instance proof. Per-instance checks are in
+   [`evidence/cli/05`](evidence/cli/05-aws-instances-running-image.txt).
 
 **One-time setup:** create a repository **variable** (not a secret) `AWS_ROLE_ARN` with the
 `ci_role_arn` Terraform output.
 
-**Rollback:** re-run the workflow for the previous commit. Or, manually:
+### Rollback (documented, not tested)
 
-```bash
-aws ssm put-parameter --name /compie-app/dev/image_tag --value <previous-sha> --overwrite
-aws autoscaling start-instance-refresh --auto-scaling-group-name compie-app-dev \
-  --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200}'
-```
+> **Neither rollback path below has been exercised in this project.** Both follow from
+> how the pipeline works, but treat them as documented procedures, not verified ones.
+
+`workflow_dispatch` always deploys the **current head of `main`**. It cannot select an
+arbitrary older commit. The two options are:
+
+1. **Revert in git (preferred).** `git revert <bad-commit>` and push to `main`. The
+   pipeline tests, builds and deploys the reverted code as a new version, and history
+   records what happened.
+2. **Point the tag back at an image already in ECR.** This is faster, with no rebuild.
+   It is a manual step run by an operator with their own AWS credentials, not by the
+   pipeline. The image must still exist in ECR; the lifecycle policy keeps the last 10.
+
+   ```bash
+   aws ecr describe-images --repository-name compie-app --image-ids imageTag=<previous-sha>   # must exist
+   aws ssm put-parameter --name /compie-app/dev/image_tag --value <previous-sha> --overwrite
+   aws autoscaling start-instance-refresh --auto-scaling-group-name compie-app-dev \
+     --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200,"SkipMatching":false}'
+   ```
+
+   Note that the next push to `main` deploys the head of `main` again.
+
+ASG **AutoRollback** is not available here. AWS supports it only when the refresh changes
+the launch template, and our image version lives in SSM.
 
 ## Security and IAM
 
@@ -252,7 +292,7 @@ aws autoscaling start-instance-refresh --auto-scaling-group-name compie-app-dev 
 
 | Identity | Can | Cannot |
 |---|---|---|
-| **EC2 instance role** | Pull from the `compie-app` ECR repo; `ssm:GetParameter` on `/compie-app/dev/*`; write to the app log group; SSM agent; `dynamodb:GetItem` on the app table **only through the VPC endpoint** (`aws:SourceVpce`) | Write to DynamoDB, scan, change parameters, push images |
+| **EC2 instance role** | Pull from the `compie-app` ECR repo; read app config (our policy scopes `ssm:GetParameter` to `/compie-app/dev/*`, but the AWS-managed SSM policy widens the **effective** read access; see the trade-off below); write to the app log group; SSM agent; `dynamodb:GetItem` on the app table **only through the VPC endpoint** (`aws:SourceVpce`) | Write to DynamoDB, scan, change parameters, push images |
 | **CI/CD role** (GitHub OIDC) | Push to the `compie-app` ECR repo; `ssm:PutParameter` on `image_tag` only; `StartInstanceRefresh` on this ASG; describe refreshes and load balancers | **Read app config**, `kms:Decrypt`, DynamoDB, other repos |
 | **Terraform operator** | Admin, used only from the operator's workstation | — |
 
@@ -273,16 +313,42 @@ at apply time, not committed.
 
 **Known trade-offs:**
 
-- `AmazonSSMManagedInstanceCore` (the AWS policy for the SSM agent) also allows
-  `ssm:GetParameter` on `*`. A custom agent policy would remove that.
+- **SSM read access is broader than our own policy suggests.** The instance role has
+  the AWS-managed policy `AmazonSSMManagedInstanceCore` (v2), which the SSM agent needs.
+  It grants `ssm:GetParameter` and `ssm:GetParameters` on `Resource: "*"`, plus agent
+  actions (`ssmmessages:*`, `ec2messages:*`, `ssm:UpdateInstanceInformation`, ...).
+  - **Effect:** the instances can read **any** SSM parameter in the account, not only
+    `/compie-app/dev/*`. That includes SecureStrings encrypted with the AWS-managed
+    `aws/ssm` key, whose key policy allows decryption through SSM for principals in the
+    account.
+  - **Not affected:** `ssm:GetParametersByPath` is not granted, and SecureStrings under a
+    customer-managed key would still need `kms:Decrypt`.
+  - **Verified with the policy simulator:** `GetParameter` on an unrelated parameter is
+    `allowed`, matched by `AmazonSSMManagedInstanceCore`.
+  - **Accepted for this assignment:** at review time the only SSM parameters in
+    us-east-1 were this app's three, and us-east-2, us-west-2 and eu-west-1 had none.
+  - **Fix for production:** replace the managed policy with a custom agent policy that
+    includes only the `ssmmessages`/`ec2messages`/`UpdateInstanceInformation` actions,
+    keeping our path-scoped `GetParameter`. Separately, use a customer-managed KMS key for
+    SecureStrings.
 - The ALB serves HTTP only; HTTPS needs a domain and an ACM certificate.
 - The SNS topic is unencrypted, because CloudWatch can publish only to topics encrypted
   with a customer-managed key, and alerts contain no sensitive data.
 
 ## Capacity and scaling
 
-- **Now:** `min 2 / desired 2 / max 4`, one instance per AZ, so the app survives the loss of
-  an instance or an AZ for inbound traffic. `max 4` leaves room for the 200% rolling deploy.
+- **Now:** `min 2 / desired 2 / max 4`, one instance per AZ. `max 4` leaves room for the
+  200% rolling deploy.
+- **What this tolerates (by design; failure scenarios were not tested):**
+  - **Losing one instance:** the ALB keeps serving from the other while the ASG replaces
+    it. Capacity is halved meanwhile.
+  - **Losing us-east-1b:** the instance in us-east-1a keeps serving, and the ASG can launch
+    replacements.
+  - **Losing us-east-1a**, where the single NAT Gateway lives: the instance in us-east-1b
+    keeps serving existing traffic, but **new instances cannot boot**. They need the NAT
+    to reach the ECR API and SSM. So the service runs at reduced capacity with no
+    self-healing until the AZ recovers. Fixing this needs one NAT per AZ or interface
+    endpoints.
 - **Self-healing:** ELB health checks with a 300s grace period. An instance failing
   `/health` is replaced automatically.
 - **How I would scale:**
