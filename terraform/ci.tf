@@ -2,9 +2,12 @@
 # Can push images, set the image tag, and start a rollout. Cannot read app config or decrypt anything.
 
 variable "github_repository" {
-  description = "GitHub repo (owner/name) allowed to assume the CI role"
+  # GitHub's OIDC "sub" claim for this repo uses immutable IDs: owner@<owner-id>/repo@<repo-id>.
+  # Binding to the IDs also blocks a deleted-and-recreated repo with the same name.
+  # The exact claim is visible in CloudTrail (AssumeRoleWithWebIdentity events).
+  description = "GitHub repo as it appears in the OIDC sub claim (owner@id/name@id)"
   type        = string
-  default     = "AmirWeiser/compie-devops-assignment"
+  default     = "AmirWeiser@123477471/compie-devops-assignment@1424430511"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {

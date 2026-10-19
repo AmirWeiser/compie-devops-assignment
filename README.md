@@ -139,7 +139,9 @@ parameter, and Terraform ignores changes to its value.
 Deploy steps:
 
 1. Authenticate to AWS with **OIDC**. There are no AWS keys in GitHub. The role trusts
-   only `repo:AmirWeiser/compie-devops-assignment:ref:refs/heads/main`.
+   only the `main` branch of this repository. GitHub's `sub` claim uses immutable IDs:
+   `repo:AmirWeiser@123477471/compie-devops-assignment@1424430511:ref:refs/heads/main`.
+   That also blocks a deleted-and-recreated repo with the same name.
 2. Build the image and push it to ECR, tagged with the short git SHA. Tags are
    immutable; a re-run reuses the existing image.
 3. Write the tag to SSM `/compie-app/dev/image_tag`.
@@ -266,7 +268,7 @@ TG=$(aws elbv2 describe-target-groups --names compie-app-dev --query 'TargetGrou
 | `/ready` AccessDenied | Request did not go through the DynamoDB gateway endpoint | Private route table has the DynamoDB prefix-list route |
 | Container cannot get credentials | IMDS hop limit | Launch template `http_put_response_hop_limit = 2` |
 | ALB returns 502/503 | No healthy targets | Target health; the app must listen on port 8000 |
-| Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | OIDC trust mismatch | Workflow runs on `main`, `AWS_ROLE_ARN` variable is set, no `environment:` in the job |
+| Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | OIDC trust mismatch | CloudTrail `AssumeRoleWithWebIdentity` events show the exact `sub` claim GitHub sent; it must match `github_repository` in `ci.tf` (owner@id/repo@id format). Also check: the workflow runs on `main`, the `AWS_ROLE_ARN` variable is set, and there is no `environment:` in the job. |
 | Pipeline: `InstanceRefreshInProgress` | A refresh is already running | Wait, or check with `aws autoscaling describe-instance-refreshes` |
 
 ## Teardown
