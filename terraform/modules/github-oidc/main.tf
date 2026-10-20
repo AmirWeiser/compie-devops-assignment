@@ -1,22 +1,14 @@
 # --- CI/CD identity for GitHub Actions (OIDC: no long-lived AWS keys in GitHub) ---
 # Can push images, set the image tag, and start a rollout. Cannot read app config or decrypt anything.
 
-variable "github_repository" {
-  # GitHub's OIDC "sub" claim for this repo uses immutable IDs: owner@<owner-id>/repo@<repo-id>.
-  # Binding to the IDs also blocks a deleted-and-recreated repo with the same name.
-  # The exact claim is visible in CloudTrail (AssumeRoleWithWebIdentity events).
-  description = "GitHub repo as it appears in the OIDC sub claim (owner@id/name@id)"
-  type        = string
-  default     = "AmirWeiser@123477471/compie-devops-assignment@1424430511"
-}
-
+# One per AWS account and URL: a second stack in the same account must not create it again.
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
 }
 
 resource "aws_iam_role" "ci" {
-  name = "${local.name}-ci"
+  name = "${var.name}-ci"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -60,19 +52,19 @@ resource "aws_iam_role_policy" "ci" {
           "ecr:BatchGetImage",
           "ecr:DescribeImages",
         ]
-        Resource = data.aws_ecr_repository.app.arn
+        Resource = var.ecr_repository_arn
       },
       {
         Sid      = "SetImageTag"
         Effect   = "Allow"
         Action   = "ssm:PutParameter"
-        Resource = aws_ssm_parameter.image_tag.arn
+        Resource = var.image_tag_parameter_arn
       },
       {
         Sid      = "Rollout"
         Effect   = "Allow"
         Action   = "autoscaling:StartInstanceRefresh"
-        Resource = aws_autoscaling_group.app.arn
+        Resource = var.asg_arn
       },
       {
         Sid    = "ReadDeployStatus"
@@ -83,8 +75,4 @@ resource "aws_iam_role_policy" "ci" {
       },
     ]
   })
-}
-
-output "ci_role_arn" {
-  value = aws_iam_role.ci.arn
 }

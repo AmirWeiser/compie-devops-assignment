@@ -12,9 +12,16 @@ out by GitHub Actions.
 > the bootstrap stack (ECR and the state bucket). The ALB URL in the evidence no longer
 > responds. To run it again, follow [Deploy to AWS](#deploy-to-aws).
 
+> **Branch `feature/terraform-modules`:** a refactor of the submitted Terraform (branch `main`,
+> commit `daa7677`) into reusable child modules, made after the submission. It has passed static
+> checks and mocked tests only and has **not been deployed**. All live results in this README
+> (evidence, policy simulator, fresh-clone plan) come from the original layout on `main`. See
+> [Terraform structure: single root vs. modules](#terraform-structure-single-root-vs-modules).
+
 ## Contents
 
 - [Architecture](#architecture)
+- [Terraform structure: single root vs. modules](#terraform-structure-single-root-vs-modules)
 - [Application and Docker](#application-and-docker)
 - [Deploy to AWS](#deploy-to-aws)
 - [CI/CD (GitHub Actions)](#cicd-github-actions)
@@ -76,23 +83,179 @@ flowchart TB
 app/                     FastAPI app (main.py), tests, Dockerfile, requirements
 docker-compose.yml       local stack: app + DynamoDB Local
 terraform/bootstrap/     one-time: S3 state bucket + ECR repository (local state)
-terraform/               main stack (S3 backend, native locking)
+terraform/environments/dev/  main stack root (S3 backend, native locking): composes the modules
   versions.tf            providers, backend, default tags
-  network.tf             VPC, subnets, IGW, NAT, routes, gateway endpoints, security groups
-  alb.tf                 ALB, target group, listener
-  compute.tf             log group, launch template, Auto Scaling Group
-  user_data.sh.tftpl     instance boot script
-  dynamodb.tf            table
-  ssm.tf                 app config parameters + image_tag
-  iam.tf                 EC2 instance role
-  ci.tf                  GitHub OIDC provider + CI/CD role
-  monitoring.tf          SNS topic + CloudWatch alarms
+  main.tf                naming locals, ECR lookup, the 7 module calls
+terraform/modules/       reusable child modules (each: main.tf, variables.tf, outputs.tf, tests/)
+  network/               VPC, subnets, IGW, NAT, routes, gateway endpoints
+  security-groups/       ALB and app security groups (they reference each other)
+  alb/                   ALB, target group, listener
+  data/                  DynamoDB table + SSM app config parameters and image_tag
+  compute/               log group, instance role, launch template, ASG, user_data.sh.tftpl
+  monitoring/            SNS topic + CloudWatch alarms
+  github-oidc/           GitHub OIDC provider + CI/CD role
 .github/workflows/       CI/CD pipeline
 evidence/                screenshots and redacted CLI output from the live deployment
 ```
 
-The Terraform is deliberately flat, one file per concern with no custom modules,
-so each resource is easy to find and explain.
+## Terraform structure: single root vs. modules
+
+The same infrastructure exists in two intentional layouts:
+
+| | `main` (submitted) | `feature/terraform-modules` (this branch) |
+|---|---|---|
+| Layout | One root module, one `.tf` file per concern | Thin root per environment + 7 child modules |
+| Status | Deployed, verified live, then destroyed | Static checks and mocked tests only, **never deployed** |
+| Best for | One small environment, fast to read and explain | Several environments sharing one tested design |
+
+### Why the submission used a single root module
+
+The assignment asked for one environment. A flat root with files named by responsibility
+(`network.tf`, `alb.tf`, `compute.tf`, ...) let every resource be found and explained in one
+place, with no input/output plumbing. Modules would have added files and indirection without a
+second consumer to justify them (KISS/YAGNI).
+
+### Why this branch uses child modules
+
+Modules start to pay off once a second environment or a second team needs the same design.
+Each module has a small, documented contract (`variables.tf` in, `outputs.tf` out). It can be
+tested on its own, and a change shows up in one place.
+
+Modules are grouped **by purpose, not by resource type**. There is no `iam` module: the
+instance role lives in `compute`, next to the instances that use it, because its policy needs
+the log group and the launch template needs the role. Splitting them would make two modules
+depend on each other. The CI/CD role has a different consumer, so it is its own module.
+
+| Module | Responsibility | Inputs | Outputs |
+|---|---|---|---|
+| `network` | VPC, public/private subnets per AZ, IGW, one NAT, routes, S3 + DynamoDB gateway endpoints | `name`, `region`, `vpc_cidr`, `az_count` (2) | `vpc_id`, `public_subnet_ids`, `private_subnet_ids`, `dynamodb_endpoint_id` |
+| `security-groups` | internet → ALB :80 → app :8000, app egress 443 only | `name`, `vpc_id`, `app_port` | `alb_security_group_id`, `app_security_group_id` |
+| `alb` | Public ALB, target group with `/health` check, listener | `name`, `vpc_id`, `public_subnet_ids`, `security_group_id`, `app_port`, `health_check_path` | `dns_name`, `target_group_arn`, `lb_arn_suffix`, `target_group_arn_suffix` |
+| `data` | DynamoDB table, SSM parameters (`welcome_message`, `table_name`, `image_tag`) | `name`, `param_path`, `welcome_message`, `image_tag` | `table_name`, `table_arn`, `param_path`, `image_tag_parameter_arn` |
+| `compute` | Log group, instance role, launch template (`user_data.sh.tftpl`), ASG | `name`, `region`, subnets, SG, target group, size (2/2/4), ECR, `param_path`, `log_group_name`, table ARN, endpoint id | `asg_name`, `asg_arn`, `log_group_name` |
+| `monitoring` | SNS topic, optional email subscription, 3 ALB alarms | `name`, `alert_email`, `lb_arn_suffix`, `target_group_arn_suffix` | `alerts_topic_arn` |
+| `github-oidc` | GitHub OIDC provider, CI/CD role scoped to ECR, `image_tag`, the ASG | `name`, `github_repository`, ECR ARN, `image_tag_parameter_arn`, `asg_arn` | `role_arn` |
+
+### How the modules communicate
+
+A module never reads another module's resources. The root passes one module's outputs into the
+next module's inputs, and Terraform builds the dependency graph from those references.
+For example, in [`environments/dev/main.tf`](terraform/environments/dev/main.tf):
+
+```hcl
+module "alb" {
+  source            = "../../modules/alb"
+  public_subnet_ids = module.network.public_subnet_ids                 # output of network
+  security_group_id = module.security_groups.alb_security_group_id     # output of security-groups
+  ...
+}
+
+module "compute" {
+  source           = "../../modules/compute"
+  target_group_arn = module.alb.target_group_arn   # instances register behind the ALB
+  param_path       = module.data.param_path        # waits for the SSM parameters, see below
+  ...
+}
+```
+
+Values flow one way: network → security-groups → alb → compute → github-oidc, with `data` and
+`monitoring` alongside. There are no cycles. The two security groups reference each other, so
+they stay inside one module, as separate rule resources.
+
+One dependency is not visible in any attribute: instances read SSM at boot. The original ASG had
+`depends_on` on the parameters. Across a module boundary this became an **output with
+`depends_on`**: `data.param_path` is only known once all three parameters exist, and
+`compute` uses it in `user_data`.
+
+**Reading `environments/dev/main.tf`:**
+1. `locals` builds the naming once: `compie-app-dev`, `/compie-app/dev` and port 8000.
+2. A `data` block looks up the ECR repository created by the bootstrap stack.
+3. Seven `module` blocks follow, in dependency order. Each argument is either a root
+   variable/local or another module's output (`module.<name>.<output>`).
+4. `outputs.tf` re-exports what operators and CI need (`alb_url`, `asg_name`, `ci_role_arn`, ...).
+
+### Adding an environment (staging, prod)
+
+A new environment is a new root directory. The modules stay unchanged:
+
+```
+terraform/environments/staging/
+  versions.tf   backend key = "staging/terraform.tfstate" (its own state file)
+  main.tf       the same module calls (copied from dev)
+  terraform.tfvars   environment = "staging", vpc_cidr, instance_type, alert_email, ...
+```
+
+Names, SSM paths and log groups are derived from `project` and `environment`, so they do not
+collide. **What would still need to change first:**
+
+- **GitHub OIDC provider.** An AWS account can hold only one provider per URL. A second
+  environment in the same account must look it up instead of creating it (for example, a
+  `create_oidc_provider` flag on the module), or each environment needs its own account.
+- **CI/CD.** The workflow deploys only to dev: the ASG, ALB and parameter names are fixed in
+  `deploy.yml`, and the CI role trusts only `refs/heads/main`. Staging and prod need their own
+  roles, trust conditions (for example GitHub environments or tags) and promotion steps.
+- **Shared bootstrap.** Every environment would share one ECR repository and one state bucket,
+  and the bootstrap stack keeps local state.
+- **Module versions.** Modules are referenced by relative path, so every environment changes
+  as soon as a module changes. Pinned versions (git tags or a registry) would let prod lag
+  behind staging.
+
+### Before real production use
+
+Being modular does not make this production-ready. Still missing, among others:
+
+- HTTPS (ACM certificate, redirect from HTTP to HTTPS) and a WAF.
+- One NAT gateway per AZ instead of one.
+- Target-tracking scaling policies.
+- DynamoDB point-in-time recovery and deletion protection.
+- Alerts routed to a paging tool instead of email.
+- `terraform plan` in pull requests, with policy checks (tflint, checkov or similar).
+- Separate AWS accounts per environment.
+- A tested rollback procedure.
+
+### Migrating an existing deployment
+
+Every address gains a module prefix, for example `aws_vpc.main` becomes
+`module.network.aws_vpc.main`. Against an existing state without migration, `plan` would replace
+all 44 resources. A migration would add one `moved` block per resource in
+`environments/dev` (the backend key is unchanged, so the state file is the same) and require a
+`plan` with **0 changes** before any apply:
+
+```hcl
+moved {
+  from = aws_subnet.private               # moves every count instance
+  to   = module.network.aws_subnet.private
+}
+```
+
+None are included, because the environment was destroyed: a fresh apply needs no migration.
+
+### Checks performed on this branch (2026-10-20)
+
+All checks are offline. Nothing was planned or applied against AWS.
+
+| Check | Result |
+|---|---|
+| `terraform fmt -check -recursive` | clean |
+| `terraform init -backend=false` + `terraform validate`, dev root and each module on its own | all valid |
+| `tflint` 0.59 with every built-in rule (`preset = "all"`) and the AWS ruleset, root and modules | no issues |
+| `terraform test` with `mock_provider "aws"`, AWS credentials disabled | 16/16 runs pass (7 module test files + 1 composition test) |
+| Mutation check: IMDSv2 set to `optional` in a copy | compute test fails as intended |
+| `user_data` rendered from `daa7677` and from this branch with the same values | byte-identical |
+| Resource and data blocks, old vs new (type + name) | same 44 blocks (40 resources, 4 data sources) |
+| Each block's body, old vs new (comments ignored) | only reference rewrites (for example `local.name` becomes `var.name`); no setting changed |
+
+**Not covered:** behaviour in AWS. The mocks do not catch API-side errors such as invalid IAM
+JSON or name limits, and the policy simulator checks were not repeated. A real `plan` and `apply`
+in a sandbox account would be the next step.
+
+Run the tests locally (no AWS credentials needed):
+
+```bash
+for d in terraform/modules/* terraform/environments/dev; do
+  terraform -chdir=$d init -backend=false && terraform -chdir=$d test
+done
+```
 
 ## Application and Docker
 
@@ -186,9 +349,9 @@ docker build --build-arg APP_VERSION="$TAG" -t "$REPO:$TAG" app && docker push "
 
 # 3. Main stack (44 resources, about 5 minutes)
 #    The state bucket is named compie-app-tfstate-<account-id>.
-terraform -chdir=terraform init -backend-config="bucket=$(terraform -chdir=terraform/bootstrap output -raw state_bucket)"
-terraform -chdir=terraform apply -var="image_tag=$TAG" -var="alert_email=you@example.com"
-terraform -chdir=terraform output alb_url
+terraform -chdir=terraform/environments/dev init -backend-config="bucket=$(terraform -chdir=terraform/bootstrap output -raw state_bucket)"
+terraform -chdir=terraform/environments/dev apply -var="image_tag=$TAG" -var="alert_email=you@example.com"
+terraform -chdir=terraform/environments/dev output alb_url
 ```
 
 - **Bootstrap state is local.** `terraform/bootstrap/terraform.tfstate` is gitignored and
@@ -196,8 +359,9 @@ terraform -chdir=terraform output alb_url
   works only there. In a fresh clone it prints nothing. On another machine, pass the
   bucket name directly, `-backend-config="bucket=compie-app-tfstate-<account-id>"`, and
   take the ECR URL from `aws ecr describe-repositories --repository-names compie-app`.
-  This path was checked read-only from a fresh clone: `init` succeeded, and `plan`
-  reported "No changes".
+  On the original flat layout (`main`), this path was checked read-only from a fresh clone:
+  `init` succeeded, and `plan` reported "No changes". The modular layout on this branch has
+  not been planned against AWS.
 - **Health checks:** instances become healthy in the target group about 2–5 minutes after
   apply (the ASG health check grace period is 300s).
 - **`image_tag`** is used only on the first apply. Afterwards the pipeline owns the SSM
@@ -368,7 +532,7 @@ log group `/compie-app/dev`. There is **one log stream per EC2 instance ID**, wi
 retention. Uvicorn access logs show the real client IP (`FORWARDED_ALLOW_IPS`). Boot
 progress (`user-data:` lines) is visible in the EC2 console output without SSH.
 
-**Alarms** (`terraform/monitoring.tf`):
+**Alarms** (`terraform/modules/monitoring`):
 
 | Alarm | Metric | Fires when | Why |
 |---|---|---|---|
@@ -444,23 +608,23 @@ SNS actions succeeded; SNS delivered 2 messages with 0 failed.
 |---|---|
 | Minimal app exposing `/` and `GET /health` | `app/main.py`; screenshots 01–02 |
 | Dockerfile; image runs locally and `/`, `/health` work | `app/Dockerfile`, `docker-compose.yml`; screenshots 04–05, `cli/01` |
-| VPC with public and private subnets | `network.tf`; `cli/02` |
-| EC2 in an ASG in private subnets, no public IPs | `compute.tf`; `cli/03` |
-| Public ALB in front of the ASG | `alb.tf`; screenshots 01–03 |
-| Launch template, target group, health checks, sensible min/desired/max | `compute.tf`, `alb.tf` |
+| VPC with public and private subnets | `modules/network`; `cli/02` |
+| EC2 in an ASG in private subnets, no public IPs | `modules/compute`; `cli/03` |
+| Public ALB in front of the ASG | `modules/alb`; screenshots 01–03 |
+| Launch template, target group, health checks, sensible min/desired/max | `modules/compute`, `modules/alb` |
 | README explains capacity and scaling | [Capacity and scaling](#capacity-and-scaling) |
 | No ECS or EKS | EC2 + Docker only |
-| Least-privilege security groups | `network.tf`; [Security and IAM](#security-and-iam) |
+| Least-privilege security groups | `modules/security-groups`; [Security and IAM](#security-and-iam) |
 | Image in ECR | `terraform/bootstrap`; `cli/04` |
-| Config outside the image, in a managed store, consumed by the service | `ssm.tf`, `user_data.sh.tftpl` |
-| Instance profile: ECR pull, read config, write logs, SSM | `iam.tf` |
-| CI/CD identity: push to ECR and trigger rollout, cannot read secrets | `ci.tf` (verified with the policy simulator) |
+| Config outside the image, in a managed store, consumed by the service | `modules/data`, `modules/compute/user_data.sh.tftpl` |
+| Instance profile: ECR pull, read config, write logs, SSM | `modules/compute` (instance role) |
+| CI/CD identity: push to ECR and trigger rollout, cannot read secrets | `modules/github-oidc` (verified with the policy simulator) |
 | No oversized admin identity | Separate instance and CI roles |
-| Managed, private DB; no hardcoded credentials | `dynamodb.tf` (IAM + VPC endpoint condition) |
+| Managed, private DB; no hardcoded credentials | `modules/data`, `modules/compute` (IAM + VPC endpoint condition) |
 | App proves DB connectivity | `/ready`; screenshot 03 |
-| Logs in CloudWatch | `compute.tf`, `user_data`; `cli/06` |
+| Logs in CloudWatch | `modules/compute`, `user_data`; `cli/06` |
 | KMS at rest for the DB and the config store | DynamoDB `aws/dynamodb`, SSM `aws/ssm` (plus EBS) |
-| Alarms on service state, sent to an endpoint, documented | `monitoring.tf`; `cli/07`; [Alerting](#logging-monitoring-and-alerting) |
+| Alarms on service state, sent to an endpoint, documented | `modules/monitoring`; `cli/07`; [Alerting](#logging-monitoring-and-alerting) |
 | `terraform apply` (+ documented bootstrap) gives a working URL | [Deploy to AWS](#deploy-to-aws) |
 | Pipeline builds, pushes to ECR and deploys to `dev` with no console steps | `deploy.yml`; runs #2 and #3 |
 | Release trigger documented | [CI/CD](#cicd-github-actions) |
@@ -480,7 +644,7 @@ SNS actions succeeded; SNS delivered 2 messages with 0 failed.
 | `/ready` AccessDenied | Request did not go through the DynamoDB gateway endpoint | Private route table has the DynamoDB prefix-list route |
 | Container cannot get credentials | IMDS hop limit | Launch template `http_put_response_hop_limit = 2` |
 | ALB returns 502/503 | No healthy targets | Target health; the app must listen on port 8000 |
-| Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | OIDC trust mismatch | CloudTrail `AssumeRoleWithWebIdentity` events show the exact `sub` claim GitHub sent; it must match `github_repository` in `ci.tf`. Also: the workflow runs on `main`, `AWS_ROLE_ARN` is set, and there is no `environment:` key in the job. |
+| Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | OIDC trust mismatch | CloudTrail `AssumeRoleWithWebIdentity` events show the exact `sub` claim GitHub sent; it must match `github_repository` in `environments/dev/variables.tf`. Also: the workflow runs on `main`, `AWS_ROLE_ARN` is set, and there is no `environment:` key in the job. |
 | Pipeline: `InstanceRefreshInProgress` | A refresh is already running | Wait, or `aws autoscaling describe-instance-refreshes` |
 
 ## Lessons learned
@@ -521,7 +685,7 @@ Approximate us-east-1 cost while the main stack runs:
 
 ```bash
 # All hourly-billed resources (NAT, ALB, EC2, ...):
-terraform -chdir=terraform destroy -var="image_tag=unused" -var="alert_email=you@example.com"
+terraform -chdir=terraform/environments/dev destroy -var="image_tag=unused" -var="alert_email=you@example.com"
 ```
 
 To also remove the bootstrap stack (ECR and the state bucket, cents per month):

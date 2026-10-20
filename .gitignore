@@ -17,3 +17,5 @@ __pycache__/
 *.tfvars
 *.tfplan
 crash.log
+# Child modules are not roots: their lock file comes from `terraform init` before `terraform test`
+terraform/modules/*/.terraform.lock.hcl

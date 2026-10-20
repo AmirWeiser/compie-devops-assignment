@@ -1,7 +1,7 @@
 # --- Alerting: CloudWatch alarms -> SNS topic -> email (placeholder for a real paging tool) ---
 
 resource "aws_sns_topic" "alerts" {
-  name = "${local.name}-alerts"
+  name = "${var.name}-alerts"
   # Not KMS-encrypted: CloudWatch can only publish to an encrypted topic with a customer-managed
   # key policy, and alert messages contain no sensitive data.
 }
@@ -17,14 +17,14 @@ resource "aws_sns_topic_subscription" "email" {
 
 locals {
   alb_dimensions = {
-    LoadBalancer = aws_lb.app.arn_suffix
-    TargetGroup  = aws_lb_target_group.app.arn_suffix
+    LoadBalancer = var.lb_arn_suffix
+    TargetGroup  = var.target_group_arn_suffix
   }
 }
 
 # 1. An instance is failing /health (container down, boot failure, bad image).
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
-  alarm_name          = "${local.name}-unhealthy-hosts"
+  alarm_name          = "${var.name}-unhealthy-hosts"
   alarm_description   = "At least one target is failing the ALB health check (/health)."
   namespace           = "AWS/ApplicationELB"
   metric_name         = "UnHealthyHostCount"
@@ -41,7 +41,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
 
 # 2. The service is down: no healthy target behind the ALB.
 resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
-  alarm_name          = "${local.name}-no-healthy-hosts"
+  alarm_name          = "${var.name}-no-healthy-hosts"
   alarm_description   = "No healthy targets behind the ALB: the application is unavailable."
   namespace           = "AWS/ApplicationELB"
   metric_name         = "HealthyHostCount"
@@ -58,7 +58,7 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
 
 # 3. The app is returning server errors (includes /ready 503s when DynamoDB is unreachable).
 resource "aws_cloudwatch_metric_alarm" "target_5xx" {
-  alarm_name          = "${local.name}-target-5xx"
+  alarm_name          = "${var.name}-target-5xx"
   alarm_description   = "Application returned 5 or more 5xx responses in 5 minutes (incl. /ready 503 = DynamoDB unreachable)."
   namespace           = "AWS/ApplicationELB"
   metric_name         = "HTTPCode_Target_5XX_Count"

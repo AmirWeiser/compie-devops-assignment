@@ -1,23 +1,25 @@
+# --- Public Application Load Balancer: HTTP :80 -> target group on the app port ---
+
 resource "aws_lb" "app" {
-  name               = local.name
+  name               = var.name
   load_balancer_type = "application"
   internal           = false
-  subnets            = aws_subnet.public[*].id
-  security_groups    = [aws_security_group.alb.id]
+  subnets            = var.public_subnet_ids
+  security_groups    = [var.security_group_id]
 
   drop_invalid_header_fields = true
 }
 
 resource "aws_lb_target_group" "app" {
-  name                 = local.name
-  port                 = 8000
+  name                 = var.name
+  port                 = var.app_port
   protocol             = "HTTP"
-  vpc_id               = aws_vpc.main.id
+  vpc_id               = var.vpc_id
   deregistration_delay = 30
 
   # Liveness only: a DynamoDB problem must not make every instance "unhealthy".
   health_check {
-    path                = "/health"
+    path                = var.health_check_path
     matcher             = "200"
     interval            = 15
     timeout             = 5
