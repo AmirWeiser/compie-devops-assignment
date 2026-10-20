@@ -7,11 +7,10 @@ Logs and Alarms, and KMS encryption at rest. Every push to `main` is tested, bui
 out by GitHub Actions.
 
 > **Status (2026-10-19):** deployed and verified end to end in us-east-1, see
-> [Deployment evidence](#deployment-evidence). The AWS environment is **still running and
-> has not been destroyed yet**. It will be torn down with the
-> [teardown steps](#cost-and-teardown) after review, to avoid ongoing cost (about
-> $2.5/day). A read-only `terraform plan` from a fresh clone of this repository reported
-> **"No changes"** against the live infrastructure.
+> [Deployment evidence](#deployment-evidence). After the submission, the AWS environment
+> was **destroyed** with the [teardown steps](#cost-and-teardown): both the main stack and
+> the bootstrap stack (ECR and the state bucket). The ALB URL in the evidence no longer
+> responds. To run it again, follow [Deploy to AWS](#deploy-to-aws).
 
 ## Contents
 
@@ -531,6 +530,12 @@ To also remove the bootstrap stack (ECR and the state bucket, cents per month):
    `force_destroy = false` on purpose.
 2. Run `terraform -chdir=terraform/bootstrap destroy`. ECR has `force_delete = true`, so its
    images are removed too.
+
+**Teardown done (2026-10-19):** main stack 44/44 resources destroyed, bootstrap stack 6/6
+(after emptying all 41 state object versions). Read-only AWS CLI checks then found no
+project resources left: no NAT gateway, load balancer, EC2 instance, EBS volume, Elastic IP,
+VPC, ECR repository, S3 bucket, DynamoDB table, SSM parameter, log group, alarm, SNS topic
+or IAM role/OIDC provider.
 
 ## How AI assistance was used
 
